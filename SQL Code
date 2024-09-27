@@ -1,0 +1,219 @@
+--1. Update the demography table. Add a random age  for each patient that falls within their respective age category. This newly added age should be an integer.
+
+ALTER TABLE demography ADD age INT;
+
+UPDATE demography
+set age = FLOOR(
+	RANDOM() * 
+	(CAST(SPLIT_PART(agecat::TEXT, '-', 2) AS INTEGER) -
+	 CAST(SPLIT_PART(agecat::TEXT, '-', 1) AS INTEGER) + 1) +
+	CAST(SPLIT_PART(agecat::TEXT, '-', 1) AS INTEGER));
+
+SELECT inpatient_number, age from demography;
+
+--2. Calculate patient's year of birth using admission date from the hospitalization_discharge and add to the demography table.
+
+ALTER TABLE demography ADD birth_year INT;
+
+UPDATE demography
+SET birth_year = 
+(SELECT DATE_PART('year', admission_date::date)-age) from hospitalization_discharge;
+
+SELECT inpatient_number, age, birth_year from demography;
+
+--3. Create a User defined function that returns the age in years of any patient as a calculation from year of birth
+
+CREATE OR REPLACE FUNCTION cal_age(year_of_birth INT)
+	RETURNS INT AS $$
+	DECLARE
+    current_year INT;
+    age INT;
+	
+	BEGIN
+	current_year := EXTRACT(YEAR FROM CURRENT_DATE);
+	age := current_year - year_of_birth;
+	RETURN age;
+	END;
+	$$ LANGUAGE plpgsql;
+
+	--To Test the user defined age function:
+		SELECT cal_age(1989) AS age;
+
+
+--4. What % of the dataset is male vs female?
+
+SELECT 
+    SUM(CASE WHEN gender = 'Male' THEN 1 ELSE 0 END) * 100 / COUNT(*) AS male_percentage,
+    SUM(CASE WHEN gender = 'Female' THEN 1 ELSE 0 END) * 100 / COUNT(*) AS female_percentage
+FROM demography;
+
+
+--5. How many patients in this dataset are farmers?
+
+SELECT COUNT(inpatient_number) from demography where occupation = 'farmer';
+
+
+--6. Group the patients by age category and display it as a pie chart.
+
+SELECT agecat, COUNT(inpatient_number) FROM demography GROUP BY agecat ORDER by agecat;
+
+
+--7. Divide BMI into slabs of 5 and show the count of patients within each one, without using case statements.
+
+select min(bmi), max(bmi) from demography;
+
+SELECT CONCAT(FLOOR(bmi / 5) * 5, '-', FLOOR(bmi / 5) * 5 + 5) AS Range, COUNT(bmi) AS Count
+FROM demography
+GROUP BY FLOOR(bmi / 5)
+ORDER BY Range;
+
+
+--8. What % of the dataset is over 70 years old
+
+SELECT (COUNT(inpatient_number) * 100 / (SELECT COUNT(*) FROM demography)) AS patients_over_70 
+FROM demography WHERE age>70;
+
+
+--9. What age group was least likely to be readmitted within 28 days.
+
+SELECT * FROM hospitalization_discharge;
+
+SELECT agecat AS age_group, count(re_admission_within_28_days) AS readmission_count FROM demography 
+join hospitalization_discharge ON demography.inpatient_number = hospitalization_discharge.inpatient_number WHERE re_admission_within_28_days = 1
+GROUP BY age_group ORDER BY readmission_count LIMIT 1;
+
+
+--10. Create a procedure to insert a column with a serial number for all rows in demography.
+
+CREATE PROCEDURE add_serial_numbernw()
+LANGUAGE plpgsql AS $$
+BEGIN
+    ALTER TABLE demography
+    ADD COLUMN serial_number SERIAL;
+	
+    UPDATE demography
+    SET serial_number = DEFAULT;
+END; 
+$$;
+
+	--to execute the procedure
+	CALL add_serial_number(); 
+
+	SELECT inpatient_number, serial_number FROM demography ORDER BY serial_number;
+
+
+
+--11. what was the average time to readmission among men?
+SELECT gender, avg(readmission_time_days_from_admission) AS Avg_readmission_time FROM demography
+JOIN hospitalization_discharge ON demography.inpatient_number = hospitalization_discharge.inpatient_number WHERE Gender = 'Male'
+GROUP BY gender;
+
+
+
+--12. Display NYHA_cardiac_function_classification as Class I: No symptoms of heart failure
+	--Class II: Symptoms of heart failure with moderate exertion
+ 	--Class III: Symptoms of heart failure with minimal exertion  and show the most common type of heart failure for each classification
+
+SELECT * FROM cardiaccomplications;
+
+ALTER TABLE cardiaccomplications
+ALTER COLUMN nyha_cardiac_function_classification TYPE TEXT; --To change column data type from INT to Text
+
+	UPDATE cardiaccomplications 
+	SET nyha_cardiac_function_classification = CASE
+    WHEN nyha_cardiac_function_classification = '1' THEN 'Class I: No symptoms of heart failure'
+    WHEN nyha_cardiac_function_classification = '2' THEN 'Class II: Symptoms of heart failure with moderate exertion'
+    WHEN nyha_cardiac_function_classification = '3' THEN 'Class III: Symptoms of heart failure with minimal exertion'
+    ELSE nyha_cardiac_function_classification::text
+	END;
+
+
+	--show the most common type of heart failure for each classification
+
+	SELECT nyha_cardiac_function_classification, type_of_heart_failure, COUNT(*) AS count
+	FROM cardiaccomplications
+	WHERE nyha_cardiac_function_classification LIKE '%Class%' 
+	GROUP BY nyha_cardiac_function_classification, type_of_heart_failure
+	ORDER BY nyha_cardiac_function_classification, count DESC;
+
+
+--13. Identify any columns relating to echocardiography and create a severity score for cardiac function. Add this column to the table
+
+--Severity Score Table
+
+--Severity Score 0 is normal, 1 is one abnormal, 2 is 2 abnormal, 3 is 3 abnormal
+
+ALTER table cardiaccomplications ADD column severity_score INT;
+
+UPDATE cardiaccomplications
+	SET severity_score = (CASE
+	WHEN lvef IS NULL THEN 0
+	WHEN lvef BETWEEN 50 AND 70 THEN 0 Else 1 END +
+		CASE
+		WHEN left_ventricular_end_diastolic_diameter_lv IS NULL THEN 0
+		WHEN left_ventricular_end_diastolic_diameter_lv BETWEEN 3.5 AND 5.6 THEN 0  ELSE 1 END +
+		CASE
+		WHEN ea IS NULL THEN 0
+		WHEN ea BETWEEN 0.6 AND 1.32 THEN 0  ELSE 1 END);
+
+SELECT inpatient_number, lvef, left_ventricular_end_diastolic_diameter_lv, ea, severity_score from cardiaccomplications;
+
+--14. What is the average height of women in cms?
+
+SELECT AVG(height * 100) AS Avg_women_height FROM demography 
+WHERE gender = 'Female' AND height IS NOT NULL;
+
+
+--15. Using the cardiac severity column from q13, find the correlation between hospital outcomes and cardiac severity
+
+SELECT * FROM hospitalization_discharge;
+
+	-- Add new column hospital_outome
+	ALTER table hospitalization_discharge ADD column hospital_outcome INT; 
+
+	--Change Text to INT for correlation: alive is 1, Dischargeagianstorder is 2, dead is 3
+	UPDATE hospitalization_discharge
+	SET hospital_outcome = CASE
+	WHEN outcome_during_hospitalization = 'Alive' THEN 1
+	WHEN outcome_during_hospitalization = 'DischargeAgainstOrder' THEN 2
+	WHEN outcome_during_hospitalization = 'Dead' THEN 3
+	END;
+
+	--Correlation
+	SELECT CORR(cc.severity_score, hd.hospital_outcome) AS correlation
+	FROM cardiaccomplications cc JOIN hospitalization_discharge hd ON cc.inpatient_number = hd.inpatient_number;
+
+
+
+--16. Show the no. of patients for everyday in March 2017. 
+	--Show the date in March along with the days between the previous recorded day in march and the current.
+
+SELECT * FROM hospitalization_discharge;
+
+	WITH daily_patients AS (SELECT admission_date::date AS visit_date,
+    COUNT(DISTINCT inpatient_number) AS patient_count
+    FROM hospitalization_discharge
+    WHERE admission_date >= '2017-03-01' AND admission_date < '2017-04-01'
+    GROUP BY visit_date)
+	
+	SELECT
+    visit_date, patient_count,
+    visit_date - LAG(visit_date) OVER (ORDER BY visit_date) AS days_since_last_record
+	FROM daily_patients ORDER BY visit_date;
+
+
+--17. Create a view that combines patient demographic details of your choice along with pre-exisiting heart conditions like MI,CHF and PVD
+
+CREATE VIEW patient_heart_condition AS 
+SELECT 
+    d.inpatient_number, 
+    d.age, 
+    d.gender, 
+    cc.myocardial_infarction, 
+    cc.congestive_heart_failure, 
+    cc.peripheral_vascular_disease
+FROM demography d
+LEFT JOIN cardiaccomplications cc ON d.inpatient_number = cc.inpatient_number
+WHERE cc.myocardial_infarction > 0 OR cc.congestive_heart_failure > 0 OR cc.peripheral_vascular_disease > 0;
+
+SELECT * FROM patient_heart_condition; -- to see the view
